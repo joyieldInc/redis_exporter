@@ -17,7 +17,7 @@ import (
 func main() {
 	var (
 		bind = flag.String("bind", ":9379", "Listen address")
-		addr = flag.String("redis", "127.0.0.1:6379", "Redis service address")
+		addr = flag.String("addr", "127.0.0.1:6379", "Redis service address")
 		name = flag.String("name", "none", "Redis service name")
 	)
 	flag.Parse()

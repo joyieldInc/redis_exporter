@@ -11,8 +11,8 @@ It is as simple as:
 
     $ ./redis_exporter
 
-With default options, redis_export will listen at 0.0.0.0:9739 and
-scrapes redis(127.0.0.1:6739).
+With default options, redis_export will listen at 0.0.0.0:9379 and
+scrapes redis(127.0.0.1:6379).
 To change default options, see:
 
     $ ./redis_exporter --help

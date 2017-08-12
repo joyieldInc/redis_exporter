@@ -92,7 +92,7 @@ func NewExporter(addr, name string) (*Exporter, error) {
 			Namespace:   namespace,
 			Name:        m[0],
 			Help:        m[1],
-			ConstLabels: prometheus.Labels{"cluster": name},
+            ConstLabels: prometheus.Labels{"cluster": name, "addr": addr},
 		})
 	}
 	for _, m := range clusterGauges {

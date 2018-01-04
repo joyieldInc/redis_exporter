@@ -59,16 +59,27 @@ var (
 type Exporter struct {
 	mutex         sync.RWMutex
 	addr          string
+	password      string
 	name          string
 	globalGauges  map[string]prometheus.Gauge
 	clusterGauges map[string]prometheus.Gauge
 	cmdstat       *prometheus.GaugeVec
 	dbkeys        *prometheus.GaugeVec
+	dbexpires     *prometheus.GaugeVec
+	conn          redis.Conn
 }
 
-func NewExporter(addr, name string) (*Exporter, error) {
+func NewExporter(uri, name string) (*Exporter, error) {
+	addr := uri
+	password := ""
+	idx := strings.LastIndex(uri, "@")
+	if idx >= 0 {
+		password = uri[:idx]
+		addr = uri[idx+1:]
+	}
 	e := &Exporter{
 		addr:          addr,
+		password:      password,
 		name:          name,
 		globalGauges:  map[string]prometheus.Gauge{},
 		clusterGauges: map[string]prometheus.Gauge{},
@@ -85,7 +96,14 @@ func NewExporter(addr, name string) (*Exporter, error) {
 			Name:        "dbkeys",
 			Help:        "Database key count",
 			ConstLabels: prometheus.Labels{"addr": addr},
-		}, []string{"db"}),
+		}, []string{"db", "role"}),
+		dbexpires: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace:   namespace,
+			Subsystem:   name,
+			Name:        "dbexpires",
+			Help:        "Database expire key count",
+			ConstLabels: prometheus.Labels{"addr": addr},
+		}, []string{"db", "role"}),
 	}
 	for _, m := range globalGauges {
 		e.globalGauges[m[0]] = prometheus.NewGauge(prometheus.GaugeOpts{
@@ -116,6 +134,7 @@ func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
 	}
 	e.cmdstat.Describe(ch)
 	e.dbkeys.Describe(ch)
+	e.dbexpires.Describe(ch)
 }
 
 func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
@@ -131,26 +150,42 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	}
 	e.cmdstat.Collect(ch)
 	e.dbkeys.Collect(ch)
+	e.dbexpires.Collect(ch)
 }
 
 func (e *Exporter) resetMetrics() {
 	e.cmdstat.Reset()
 	e.dbkeys.Reset()
+	e.dbexpires.Reset()
 }
 
 func (e *Exporter) scrape() {
-	c, err := redis.Dial("tcp", e.addr)
-	if err != nil {
-		log.Printf("dial redis %s err:%q\n", e.addr, err)
-		return
+	var err error
+	c := e.conn
+	if c == nil {
+		c, err = redis.Dial("tcp", e.addr)
+		if err != nil {
+			log.Printf("dial redis %s err:%q\n", e.addr, err)
+			return
+		}
+		e.conn = c
 	}
-	defer c.Close()
+	if len(e.password) > 0 {
+		c.Do("AUTH", e.password)
+	}
 	r, err := redis.String(c.Do("INFO", "all"))
 	if err != nil {
 		log.Printf("redis %s do INFO err:%q\n", e.addr, err)
+		c.Close()
+		e.conn = nil
 		return
 	}
-	role := ""
+	role := "none"
+	if strings.Index(r, "role:master") >= 0 {
+		role = "master"
+	} else if strings.Index(r, "role:slave") >= 0 {
+		role = "slave"
+	}
 	cpu := 0.
 	used_memory := 0.
 	maxmemory := 0.
@@ -162,9 +197,7 @@ func (e *Exporter) scrape() {
 		}
 		k := line[:idx]
 		v := line[idx+1:]
-		if k == "role" {
-			role = v
-		} else if strings.HasPrefix(k, "cmdstat_") {
+		if strings.HasPrefix(k, "cmdstat_") {
 			cmd := k[8:]
 			b := strings.Index(v, "=")
 			t := strings.Index(v, ",")
@@ -177,12 +210,18 @@ func (e *Exporter) scrape() {
 		} else if strings.HasPrefix(k, "db") {
 			if len(k) >= 3 {
 				db := k[2:]
-				b := strings.Index(v, "=")
-				t := strings.Index(v, ",")
-				if b > 0 && b < t {
-					cnt, err := strconv.ParseFloat(v[b+1:t], 64)
-					if err == nil {
-						e.dbkeys.WithLabelValues(db).Set(cnt)
+				items := strings.Split(v, ",")
+				for _, s := range items {
+					if strings.HasPrefix(s, "keys=") {
+						cnt, err := strconv.ParseFloat(s[5:], 64)
+						if err == nil {
+							e.dbkeys.WithLabelValues(db, role).Set(cnt)
+						}
+					} else if strings.HasPrefix(s, "expires=") {
+						cnt, err := strconv.ParseFloat(s[8:], 64)
+						if err == nil {
+							e.dbexpires.WithLabelValues(db, role).Set(cnt)
+						}
 					}
 				}
 			}
@@ -209,13 +248,15 @@ func (e *Exporter) scrape() {
 			}
 		}
 	}
-	if role == "master" {
-		if g, ok := e.clusterGauges["master_used_memory"]; ok {
-			g.Set(used_memory)
-		}
-		if g, ok := e.clusterGauges["master_maxmemory"]; ok {
-			g.Set(maxmemory)
-		}
+	if role != "master" {
+		used_memory = 0.
+		maxmemory = 0.
+	}
+	if g, ok := e.clusterGauges["master_used_memory"]; ok {
+		g.Set(used_memory)
+	}
+	if g, ok := e.clusterGauges["master_maxmemory"]; ok {
+		g.Set(maxmemory)
 	}
 	if g, ok := e.globalGauges["used_cpu"]; ok {
 		g.Set(cpu)

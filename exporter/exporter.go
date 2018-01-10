@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 const (
@@ -141,7 +142,10 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	e.mutex.Lock()
 	defer e.mutex.Unlock()
 	e.resetMetrics()
-	e.scrape()
+	err := e.scrape()
+	if err != nil {
+		return
+	}
 	for _, g := range e.globalGauges {
 		ch <- g
 	}
@@ -159,14 +163,21 @@ func (e *Exporter) resetMetrics() {
 	e.dbexpires.Reset()
 }
 
-func (e *Exporter) scrape() {
+func (e *Exporter) scrape() error {
 	var err error
 	c := e.conn
 	if c == nil {
-		c, err = redis.Dial("tcp", e.addr)
+		timeout := 5 * time.Second
+		c, err = redis.Dial(
+			"tcp",
+			e.addr,
+			redis.DialConnectTimeout(timeout),
+			redis.DialReadTimeout(timeout),
+			redis.DialWriteTimeout(timeout),
+		)
 		if err != nil {
 			log.Printf("dial redis %s err:%q\n", e.addr, err)
-			return
+			return err
 		}
 		e.conn = c
 	}
@@ -178,7 +189,7 @@ func (e *Exporter) scrape() {
 		log.Printf("redis %s do INFO err:%q\n", e.addr, err)
 		c.Close()
 		e.conn = nil
-		return
+		return err
 	}
 	role := "none"
 	if strings.Index(r, "role:master") >= 0 {
@@ -264,4 +275,5 @@ func (e *Exporter) scrape() {
 	if g, ok := e.clusterGauges["used_cpu"]; ok {
 		g.Set(cpu)
 	}
+	return nil
 }
